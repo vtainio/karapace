@@ -33,6 +33,10 @@ kafka: $(KAFKA_PATH)
 	$(KAFKA_PATH)/bin/zookeeper-server-start.sh $(KAFKA_PATH)/config/zookeeper.properties &
 	$(KAFKA_PATH)/bin/kafka-server-start.sh $(KAFKA_PATH)/config/server.properties &
 
+.PHONY: kafka-stop
+kafka-stop: $(KAFKA_PATH)
+	$(KAFKA_PATH)/bin/kafka-server-stop.sh $(KAFKA_PATH)/config/server.properties &
+
 .PHONY: pylint
 pylint: $(GENERATED)
 	python3 -m pylint --rcfile .pylintrc $(ALL_PYTHON_DIRS)

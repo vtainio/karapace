@@ -19,3 +19,4 @@ script:
   - "make pylint"
   - "make flake8"
   - "make unittest"
+  - "make kafka-stop"
