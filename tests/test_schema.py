@@ -9,6 +9,7 @@ from .utils import Client
 import json as jsonlib
 import os
 import pytest
+import requests
 
 pytest_plugins = "aiohttp.pytest_plugin"
 baseurl = "http://localhost:8081"
@@ -817,6 +818,11 @@ async def config_checks(c):
     assert res.json()["compatibilityLevel"] == "NONE"
 
 
+async def check_http_headers(server_uri):
+    res = requests.get(f"{server_uri}/subjects", headers={"Accept": "application/json"})
+    assert res.headers["Content-Type"] == "application/json"
+
+
 async def run_schema_tests(c):
     await schema_checks(c)
     await check_type_compatibility(c)
@@ -842,3 +848,4 @@ async def test_remote():
         pytest.skip("SERVER_URI env variable not set")
     c = Client(server_uri=server_uri)
     await run_schema_tests(c)
+    await check_http_headers(server_uri)

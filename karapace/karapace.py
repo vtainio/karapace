@@ -4,6 +4,7 @@ karapace - main
 Copyright (c) 2019 Aiven Ltd
 See LICENSE for details
 """
+from functools import wraps
 from kafka import KafkaProducer
 from karapace.compatibility import Compatibility, IncompatibleSchema
 from karapace.config import set_config_defaults
@@ -39,6 +40,41 @@ TRANSITIVE_MODES = {
     "FULL_TRANSITIVE",
 }
 
+ACCEPTED_CONTENT_TYPES = {
+    "application/vnd.schemaregistry.v1+json",
+    "application/vnd.schemaregistry+json",
+    "application/json",
+    "application/octet-stream",
+}
+
+
+def schema_api(func):
+    @wraps(func)
+    async def wrapper(self, *args, **kwargs):
+        request = kwargs["request"]
+        method = request.method
+        headers = request.headers
+
+        # TODO HTTP methods separately.
+        content_type = "application/vnd.schemaregistry.v1+json"
+        if "Accept" in headers:
+            if headers["Accept"] == "*/*":  # Default value
+                pass
+            elif headers["Accept"] in ACCEPTED_CONTENT_TYPES:
+                content_type = headers["Accept"]
+            else:
+                raise HTTPResponse(
+                    body={
+                        "error_code": 406,
+                        "message": "HTTP 406 Not Acceptable"
+                    },
+                    status=406,
+                )
+        kwargs["content_type"] = content_type
+        return await func(self, *args, **kwargs)
+
+    return wrapper
+
 
 class InvalidConfiguration(Exception):
     pass
@@ -67,19 +103,29 @@ class Karapace(RestApp):
             method="POST"
         )
 
-        self.route("/config/<subject:path>", callback=self.config_subject_get, method="GET")
-        self.route("/config/<subject:path>", callback=self.config_subject_set, method="PUT")
-        self.route("/config", callback=self.config_get, method="GET")
-        self.route("/config", callback=self.config_set, method="PUT")
+        self.route("/config/<subject:path>", callback=self.config_subject_get, method="GET", with_request=True)
+        self.route("/config/<subject:path>", callback=self.config_subject_set, method="PUT", with_request=True)
+        self.route("/config", callback=self.config_get, method="GET", with_request=True)
+        self.route("/config", callback=self.config_set, method="PUT", with_request=True)
 
-        self.route("/schemas/ids/<schema_id:path>", callback=self.schemas_get, method="GET")
+        self.route("/schemas/ids/<schema_id:path>", callback=self.schemas_get, method="GET", with_request=True)
 
-        self.route("/subjects", callback=self.subjects_list, method="GET")
-        self.route("/subjects/<subject:path>/versions", callback=self.subject_post, method="POST")
-        self.route("/subjects/<subject:path>/versions", callback=self.subject_versions_list, method="GET")
-        self.route("/subjects/<subject:path>/versions/<version:path>", callback=self.subject_version_get, method="GET")
-        self.route("/subjects/<subject:path>/versions/<version:path>", callback=self.subject_version_delete, method="DELETE")
-        self.route("/subjects/<subject:path>", callback=self.subject_delete, method="DELETE")
+        self.route("/subjects", callback=self.subjects_list, method="GET", with_request=True, json_body=False)
+        self.route("/subjects/<subject:path>/versions", callback=self.subject_post, method="POST", with_request=True, json_body=True)
+        self.route("/subjects/<subject:path>/versions", callback=self.subject_versions_list, method="GET", with_request=True)
+        self.route(
+            "/subjects/<subject:path>/versions/<version:path>",
+            callback=self.subject_version_get,
+            method="GET",
+            with_request=True
+        )
+        self.route(
+            "/subjects/<subject:path>/versions/<version:path>",
+            callback=self.subject_version_delete,
+            method="DELETE",
+            with_request=True
+        )
+        self.route("/subjects/<subject:path>", callback=self.subject_delete, method="DELETE", with_request=True)
 
         self.ksr = None
         self._set_log_level()
@@ -150,11 +196,11 @@ class Karapace(RestApp):
         return subject_data
 
     @staticmethod
-    def r(body, status=200):
+    def r(body, content_type, status=200):
         raise HTTPResponse(
             body=body,
             status=status,
-            content_type="application/vnd.schemaregistry.v1+json",
+            content_type=content_type,
             headers={},
         )
 
@@ -209,7 +255,8 @@ class Karapace(RestApp):
         value = '{{"subject":"{}","version":{}}}'.format(subject, version)
         return self.send_kafka_message(key, value)
 
-    async def compatibility_check(self, *, subject, version, request):
+    @schema_api
+    async def compatibility_check(self, content_type, *, subject, version, request):
         """Check for schema compatibility"""
         body = request.json
         self.log.info("Got request to check subject: %r, version_id: %r compatibility", subject, version)
@@ -236,6 +283,7 @@ class Karapace(RestApp):
             self.r({"is_compatible": False})
         self.r({"is_compatible": True})
 
+    @schema_api
     async def schemas_get(self, *, schema_id):
         schema = self.ksr.schemas.get(int(schema_id))
         if not schema:
@@ -243,9 +291,11 @@ class Karapace(RestApp):
             self.r(body={"error_code": 40403, "message": "Schema not found"}, status=404)
         self.r({"schema": schema})
 
-    async def config_get(self):
-        self.r({"compatibilityLevel": self.ksr.config["compatibility"]})
+    @schema_api
+    async def config_get(self, content_type):
+        self.r({"compatibilityLevel": self.ksr.config["compatibility"]}, content_type)
 
+    @schema_api
     async def config_set(self, *, request):
         if "compatibility" in request.json and request.json["compatibility"] in COMPATIBILITY_MODES:
             compatibility_level = request.json["compatibility"]
@@ -260,6 +310,7 @@ class Karapace(RestApp):
             )
         self.r({"compatibility": self.ksr.config["compatibility"]})
 
+    @schema_api
     async def config_subject_get(self, *, subject):
         # Config for a subject can exist without schemas so no need to check for their existence
         subject_data = self.ksr.subjects.get(subject)
@@ -269,6 +320,7 @@ class Karapace(RestApp):
 
         self.r({"error_code": 40401, "message": "Subject not found."}, status=404)
 
+    @schema_api
     async def config_subject_set(self, *, request, subject):
         if "compatibility" in request.json and request.json["compatibility"] in COMPATIBILITY_MODES:
             self.send_config_message(compatibility_level=request.json["compatibility"], subject=subject)
@@ -277,10 +329,12 @@ class Karapace(RestApp):
 
         self.r({"compatibility": request.json["compatibility"]})
 
-    async def subjects_list(self):
+    @schema_api
+    async def subjects_list(self, content_type):
         subjects_list = [key for key, val in self.ksr.subjects.items() if self.ksr.get_schemas(key)]
-        self.r(subjects_list)
+        self.r(subjects_list, status=200, content_type=content_type)
 
+    @schema_api
     async def subject_delete(self, *, subject):
         self._subject_get(subject)
         version_list = list(self.ksr.get_schemas(subject))
@@ -289,8 +343,9 @@ class Karapace(RestApp):
         else:
             latest_schema_id = 0
         self.send_delete_subject_message(subject, latest_schema_id)
-        self.r(version_list, status=200)
+        self.r(version_list, content_type, status=200)
 
+    @schema_api
     async def subject_version_get(self, *, subject, version, return_dict=False):
         if version != "latest" and int(version) < 1:
             self.r({
@@ -326,6 +381,7 @@ class Karapace(RestApp):
             return ret
         self.r(ret)
 
+    @schema_api
     async def subject_version_delete(self, *, subject, version):
         version = int(version)
         subject_data = self._subject_get(subject)
@@ -337,6 +393,7 @@ class Karapace(RestApp):
         self.send_schema_message(subject, schema, schema_id, version, deleted=True)
         self.r(str(version), status=200)
 
+    @schema_api
     async def subject_versions_list(self, *, subject):
         subject_data = self._subject_get(subject)
         self.r(list(subject_data["schemas"]), status=200)
@@ -353,14 +410,15 @@ class Karapace(RestApp):
                     return master, master_url
                 await asyncio.sleep(1.0)
 
-    async def subject_post(self, *, subject, request):
+    @schema_api
+    async def subject_post(self, content_type, *, subject, request):
         body = request.json
         self.log.debug("POST with subject: %r, request: %r", subject, body)
         are_we_master, master_url = await self.get_master()
         if are_we_master:
             self.write_new_schema_local(subject, body)
         elif are_we_master is None:
-            self.r({"error_code": 50003, "message": "Error while forwarding the request to the master."}, status=500)
+            self.r({"error_code": 50003, "message": "Error while forwarding the request to the master."}, content_type, status=500)
         else:
             await self.write_new_schema_remote(subject, body, master_url)
 
